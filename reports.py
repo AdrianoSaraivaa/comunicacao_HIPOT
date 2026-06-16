@@ -1,3 +1,7 @@
+import csv
+from pathlib import Path
+from datetime import datetime
+
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -11,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFrame,
     QLineEdit,
+    QMessageBox,
 )
 from PySide6.QtCore import QDate, Qt
 from database import conectar
@@ -22,25 +27,26 @@ class RelatorioWindow(QWidget):
         self.setWindowTitle("📊 Histórico e Gestão de Ensaios")
         self.setMinimumSize(1100, 700)
 
+        # Lista usada para exportar exatamente os dados filtrados/exibidos
+        self.dados_filtrados = []
+
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(20, 20, 20, 20)
         self.main_layout.setSpacing(15)
 
-        # ======================================================
-        # PAINEL DE FILTROS E BUSCA (CAPRICHADO)
-        # ======================================================
         filter_frame = QFrame()
         filter_frame.setStyleSheet(
             "background-color: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6;"
         )
         filter_layout = QVBoxLayout(filter_frame)
 
-        # Linha 1: Datas e Status
         top_row = QHBoxLayout()
         self.data_inicio = QDateEdit(QDate.currentDate().addDays(-30))
         self.data_inicio.setCalendarPopup(True)
+
         self.data_fim = QDateEdit(QDate.currentDate())
         self.data_fim.setCalendarPopup(True)
+
         self.combo_status = QComboBox()
         self.combo_status.addItems(
             ["🔍 Todos os Resultados", "✅ APROVADO", "❌ REPROVADO"]
@@ -55,21 +61,28 @@ class RelatorioWindow(QWidget):
         top_row.addStretch()
         filter_layout.addLayout(top_row)
 
-        # Linha 2: Busca por Número de Série
         search_row = QHBoxLayout()
         self.search_sn = QLineEdit()
         self.search_sn.setPlaceholderText("🔍 Digite o Número de Série para buscar...")
         self.search_sn.setStyleSheet(
             "padding: 8px; font-size: 14px; border: 1px solid #ced4da;"
         )
-        self.search_sn.textChanged.connect(self.carregar_dados)  # Busca enquanto digita
+        self.search_sn.textChanged.connect(self.carregar_dados)
 
         self.btn_filtrar = QPushButton("⚡ Atualizar Lista")
         self.btn_filtrar.setStyleSheet(
             """
-            QPushButton { background-color: #0d6efd; color: white; font-weight: bold; border-radius: 5px; padding: 8px 20px; }
-            QPushButton:hover { background-color: #0b5ed7; }
-        """
+            QPushButton {
+                background-color: #0d6efd;
+                color: white;
+                font-weight: bold;
+                border-radius: 5px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #0b5ed7;
+            }
+            """
         )
         self.btn_filtrar.clicked.connect(self.carregar_dados)
 
@@ -80,16 +93,12 @@ class RelatorioWindow(QWidget):
 
         self.main_layout.addWidget(filter_frame)
 
-        # KPI de Resumo
         self.label_resumo = QLabel("Mostrando: 0 testes encontrados")
         self.label_resumo.setStyleSheet(
             "font-size: 13px; color: #666; font-style: italic;"
         )
         self.main_layout.addWidget(self.label_resumo)
 
-        # ======================================================
-        # TABELA DE DADOS (AGORA COM 6 COLUNAS)
-        # ======================================================
         self.tabela = QTableWidget()
         self.tabela.setColumnCount(6)
         self.tabela.setHorizontalHeaderLabels(
@@ -98,36 +107,50 @@ class RelatorioWindow(QWidget):
 
         header = self.tabela.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)  # S/N em destaque
-        header.setSectionResizeMode(5, QHeaderView.Stretch)  # Relatório expandido
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
 
         self.tabela.setSelectionBehavior(QTableWidget.SelectRows)
         self.tabela.setAlternatingRowColors(True)
         self.tabela.setEditTriggers(QTableWidget.NoEditTriggers)
         self.main_layout.addWidget(self.tabela)
 
-        # Botão Imprimir
-        self.btn_imprimir = QPushButton("🖨️ Gerar Relatório de Impressão (PDF)")
+        # Botão reaproveitado: antes era PDF, agora exporta CSV
+        self.btn_imprimir = QPushButton("📄 Exportar relatório CSV")
         self.btn_imprimir.setMinimumHeight(45)
+        self.btn_imprimir.setEnabled(True)
         self.btn_imprimir.setStyleSheet(
             "background-color: #198754; color: white; font-weight: bold; border-radius: 8px;"
         )
-        self.btn_imprimir.clicked.connect(self.imprimir_relatorio)
+        self.btn_imprimir.clicked.connect(self.exportar_relatorio_csv)
         self.main_layout.addWidget(self.btn_imprimir)
 
         self.carregar_dados()
 
     def carregar_dados(self):
-        """Busca dados filtrando por Data, Status e Número de Série."""
+        """Busca dados filtrando por data, status e número de série."""
         self.tabela.setRowCount(0)
+        self.dados_filtrados = []
+
         conn = conectar()
         cursor = conn.cursor()
 
         status_sel = self.combo_status.currentText()
         busca_sn = self.search_sn.text().strip()
 
-        # Query base buscando a nova coluna numero_serie
-        query = "SELECT id, data_hora, numero_serie, operador, resultado, relatorio FROM testes_hipot WHERE 1=1"
+        query = """
+            SELECT
+                id,
+                data_hora,
+                numero_serie,
+                operador,
+                resultado,
+                relatorio,
+                porta_com,
+                baudrate
+            FROM testes_hipot
+            WHERE 1=1
+        """
         params = []
 
         if "APROVADO" in status_sel:
@@ -138,6 +161,8 @@ class RelatorioWindow(QWidget):
         if busca_sn:
             query += " AND numero_serie LIKE ?"
             params.append(f"%{busca_sn}%")
+
+        query += " ORDER BY id DESC"
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -151,14 +176,29 @@ class RelatorioWindow(QWidget):
             data_objeto = QDate.fromString(data_str, "dd/MM/yyyy")
 
             if data_objeto >= d_inicio and data_objeto <= d_fim:
-                row_idx = self.tabela.rowCount()
-                self.tabela.insertRow(row_idx)
                 testes_filtrados += 1
 
-                for col_idx, data in enumerate(row_data):
+                registro = {
+                    "id": row_data[0],
+                    "data_hora": row_data[1],
+                    "numero_serie": row_data[2],
+                    "operador": row_data[3],
+                    "resultado": row_data[4],
+                    "relatorio": row_data[5],
+                    "porta_com": row_data[6],
+                    "baudrate": row_data[7],
+                }
+
+                self.dados_filtrados.append(registro)
+
+                row_idx = self.tabela.rowCount()
+                self.tabela.insertRow(row_idx)
+
+                dados_tabela = row_data[:6]
+
+                for col_idx, data in enumerate(dados_tabela):
                     item = QTableWidgetItem(str(data))
 
-                    # Estilização do Resultado (Coluna 4 agora)
                     if col_idx == 4:
                         if data == "APROVADO":
                             item.setForeground(Qt.darkGreen)
@@ -166,6 +206,7 @@ class RelatorioWindow(QWidget):
                         else:
                             item.setForeground(Qt.red)
                             item.setText("❌ REPROVADO")
+
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
@@ -176,8 +217,45 @@ class RelatorioWindow(QWidget):
         self.label_resumo.setText(
             f"📋 Filtro aplicado: {testes_filtrados} testes encontrados."
         )
+
         conn.close()
 
-    def imprimir_relatorio(self):
-        # Lógica de impressão (PDF)
-        pass
+    def exportar_relatorio_csv(self):
+        """Exporta os dados atualmente filtrados para CSV."""
+
+        if not self.dados_filtrados:
+            QMessageBox.information(
+                self,
+                "Exportação CSV",
+                "Nenhum dado disponível para exportação.",
+            )
+            return
+
+        pasta_exportacao = Path("data") / "hipot" / "exports"
+        pasta_exportacao.mkdir(parents=True, exist_ok=True)
+
+        nome_arquivo = f"relatorio_hipot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        caminho_arquivo = pasta_exportacao / nome_arquivo
+
+        colunas = [
+            "id",
+            "data_hora",
+            "numero_serie",
+            "operador",
+            "resultado",
+            "relatorio",
+            "porta_com",
+            "baudrate",
+        ]
+
+        # utf-8-sig facilita abertura correta no Excel
+        with open(caminho_arquivo, mode="w", encoding="utf-8-sig", newline="") as arquivo:
+            writer = csv.DictWriter(arquivo, fieldnames=colunas, delimiter=";")
+            writer.writeheader()
+            writer.writerows(self.dados_filtrados)
+
+        QMessageBox.information(
+            self,
+            "Exportação concluída",
+            f"Relatório CSV gerado com sucesso:\n\n{caminho_arquivo.resolve()}",
+        )  
